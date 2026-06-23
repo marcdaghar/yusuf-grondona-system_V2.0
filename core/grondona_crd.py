@@ -1,6 +1,7 @@
 """
 Module du système Grondona (Commodity Reserve Department)
 Gestion des prix plancher/plafond et des stockpiles
+Mécanisme purifié: Guildes → Fulus → CRD → CBU
 
 Author: Marc Daghar
 License: CC BY-SA 4.0
@@ -8,7 +9,8 @@ License: CC BY-SA 4.0
 
 import numpy as np
 from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import time
 
 
 @dataclass
@@ -23,18 +25,41 @@ class Commodity:
     storage_cost: float = 0.005
 
 
+@dataclass
+class GuildInvestment:
+    """Investissement d'une guilde dans le CRD"""
+    guild_id: str
+    commodity: str
+    quantity: float
+    price: float
+    cbu_issued: float
+    timestamp: float
+
+
 class GrondonaCRD:
     """
-    Commodity Reserve Department basé sur le système Grondona
+    Commodity Reserve Department — Mécanisme purifié
 
-    Mécanisme:
+    Flux économique:
+    1. Guildes produisent des Fulus
+    2. Guildes investissent Fulus → CRD
+    3. CRD achète commodités, constitue stocks
+    4. CRD émet des CBU adossés (80% couverture)
+    5. CBU retournent aux guildes pour commerce
+    6. Cycle vertueux (50% réinvesti)
+
+    Mécanisme de régulation:
     - Prix < plancher: achat (expansion monétaire)
     - Prix > plafond: vente (contraction monétaire)
     """
 
-    def __init__(self):
+    def __init__(self, coverage_rate: float = 0.8):
         self.commodities: Dict[str, Commodity] = {}
         self.money_supply: float = 0.0
+        self.cbu_supply: float = 0.0
+        self.investments: Dict[str, GuildInvestment] = {}
+        self.investment_history: List[GuildInvestment] = []
+        self.coverage_rate = coverage_rate
         self.history: List[Dict] = []
 
     def add_commodity(self, 
@@ -53,6 +78,80 @@ class GrondonaCRD:
             stock=initial_stock,
             elasticity=elasticity
         )
+
+    def invest_fulus(self, guild_id: str, amount: float, commodity: str) -> bool:
+        """
+        Les guildes investissent leurs fulus dans le CRD
+
+        Args:
+            guild_id: Identifiant de la guilde
+            amount: Montant en Fulus
+            commodity: Type de commodité à acheter
+
+        Returns:
+            True si l'investissement réussit
+        """
+        if commodity not in self.commodities:
+            return False
+
+        if amount <= 0:
+            return False
+
+        # Achat de commodités avec les fulus
+        price = self.commodities[commodity].current_price
+        quantity = amount / price
+
+        # Constitution des stocks physiques
+        self.commodities[commodity].stock += quantity
+
+        # Émission de CBU adossés (taux de couverture)
+        cbu_issued = quantity * price * self.coverage_rate
+        self.cbu_supply += cbu_issued
+        self.money_supply += cbu_issued
+
+        # Enregistrement de l'investissement
+        investment = GuildInvestment(
+            guild_id=guild_id,
+            commodity=commodity,
+            quantity=quantity,
+            price=price,
+            cbu_issued=cbu_issued,
+            timestamp=time.time()
+        )
+
+        self.investments[guild_id] = investment
+        self.investment_history.append(investment)
+
+        return True
+
+    def get_investment_return(self, guild_id: str) -> float:
+        """
+        Retour sur investissement pour une guilde
+
+        Returns:
+            Plus-value en pourcentage
+        """
+        if guild_id not in self.investments:
+            return 0.0
+
+        invest = self.investments[guild_id]
+        commodity = self.commodities[invest.commodity]
+
+        # Plus-value sur le stock
+        current_value = invest.quantity * commodity.current_price
+        initial_value = invest.quantity * invest.price
+
+        if initial_value == 0:
+            return 0.0
+
+        return (current_value - initial_value) / initial_value
+
+    def get_total_investments(self) -> Dict[str, float]:
+        """Total des investissements par commodité"""
+        totals = {}
+        for inv in self.investment_history:
+            totals[inv.commodity] = totals.get(inv.commodity, 0) + inv.cbu_issued
+        return totals
 
     def step(self, market_prices: Dict[str, float]) -> Dict[str, Dict]:
         """
@@ -117,6 +216,8 @@ class GrondonaCRD:
         """Enregistre l'état du CRD"""
         state = {
             'money_supply': self.money_supply,
+            'cbu_supply': self.cbu_supply,
+            'total_investments': len(self.investment_history),
             'commodities': {
                 name: {
                     'stock': c.stock,
@@ -136,6 +237,14 @@ class GrondonaCRD:
         for c in self.commodities.values():
             total += c.stock * c.current_price
         return total
+
+    def get_backing_ratio(self) -> float:
+        """
+        Taux d'adossement: valeur physique / CBU émis
+        """
+        if self.cbu_supply == 0:
+            return 1.0
+        return self.total_stock_value() / self.cbu_supply
 
     def get_entropy_bound(self) -> float:
         """Calcule la borne d'entropie du système"""
@@ -183,7 +292,9 @@ def simulate_crd(initial_prices: Dict[str, float],
         results.append({
             'period': period,
             'money_supply': crd.money_supply,
+            'cbu_supply': crd.cbu_supply,
             'total_value': crd.total_stock_value(),
+            'backing_ratio': crd.get_backing_ratio(),
             'actions': actions
         })
 
